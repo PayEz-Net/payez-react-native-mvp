@@ -1,12 +1,30 @@
 import { ApiResponse } from '../types/auth';
 
 // Configuration
-const API_BASE_URL = process.env.IDP_BASE_URL || 'https://idp.payez.net';
-const CLIENT_ID = process.env.CLIENT_ID || 'payez-mobile-client';
+// Note: In production, these should come from environment config
+const API_BASE_URL = 'https://idp.payez.net';
+const CLIENT_ID = 'payez-mobile-client';
 
 interface RequestOptions extends RequestInit {
   token?: string;
   skipAuth?: boolean;
+  skipInterceptor?: boolean; // Skip 401 interceptor (used for refresh calls)
+}
+
+// Token refresh callback - set by auth store to avoid circular dependency
+let tokenRefreshCallback: (() => Promise<string | null>) | null = null;
+let getTokenCallback: (() => string | null) | null = null;
+
+/**
+ * Configure the API client with auth callbacks
+ * Called from auth store initialization to avoid circular imports
+ */
+export function configureApiAuth(config: {
+  getToken: () => string | null;
+  refreshToken: () => Promise<string | null>;
+}) {
+  getTokenCallback = config.getToken;
+  tokenRefreshCallback = config.refreshToken;
 }
 
 // Type guard for API responses
@@ -38,17 +56,20 @@ class StandardizedApi {
 
   private async request<T>(
     endpoint: string,
-    options: RequestOptions = {}
+    options: RequestOptions = {},
+    isRetry: boolean = false
   ): Promise<ApiResponse<T>> {
-    const { token, skipAuth, headers = {}, ...fetchOptions } = options;
+    const { token, skipAuth, skipInterceptor, headers = {}, ...fetchOptions } = options;
 
     const finalHeaders: HeadersInit = {
       ...this.defaultHeaders,
       ...headers,
     };
 
-    if (token && !skipAuth) {
-      finalHeaders['Authorization'] = `Bearer ${token}`;
+    // Use provided token or get from callback
+    const authToken = token || (!skipAuth && getTokenCallback ? getTokenCallback() : null);
+    if (authToken && !skipAuth) {
+      finalHeaders['Authorization'] = `Bearer ${authToken}`;
     }
 
     try {
@@ -65,6 +86,28 @@ class StandardizedApi {
         data = await response.json();
       } else {
         data = await response.text();
+      }
+
+      // Handle 401 Unauthorized - attempt token refresh and retry
+      if (response.status === 401 && !isRetry && !skipInterceptor && tokenRefreshCallback) {
+        console.log('[API] 401 received, attempting token refresh...');
+
+        try {
+          const newToken = await tokenRefreshCallback();
+
+          if (newToken) {
+            console.log('[API] Token refreshed, retrying request...');
+            // Retry with new token
+            return this.request<T>(
+              endpoint,
+              { ...options, token: newToken },
+              true // Mark as retry to prevent infinite loop
+            );
+          }
+        } catch (refreshError) {
+          console.error('[API] Token refresh failed:', refreshError);
+          // Return original 401 error
+        }
       }
 
       if (!response.ok) {
@@ -123,6 +166,7 @@ class StandardizedApi {
 export const standardizedApi = new StandardizedApi();
 
 // Account-specific API methods
+// Endpoints based on PayEz-Core IDP API
 class AccountApi {
   private api: StandardizedApi;
 
@@ -130,58 +174,124 @@ class AccountApi {
     this.api = new StandardizedApi();
   }
 
+  // Primary authentication
   async login(email: string, password: string) {
-    return this.api.post('/auth/login', { email, password }, { skipAuth: true });
+    return this.api.post('/api/ExternalAuth/login', { email, password }, { skipAuth: true });
   }
 
-  async signup(email: string, password: string, name: string) {
-    return this.api.post('/auth/signup', { email, password, name }, { skipAuth: true });
+  // Registration
+  async signup(data: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+  }) {
+    return this.api.post('/api/ExternalAuth/lead/registration', {
+      email: data.email,
+      password: data.password,
+      first_name: data.firstName,
+      last_name: data.lastName,
+    }, { skipAuth: true });
   }
 
-  async logout(token: string) {
-    return this.api.post('/auth/logout', {}, { token });
-  }
-
+  // Token management
   async refreshToken(refreshToken: string) {
-    return this.api.post('/auth/refresh', { refreshToken }, { skipAuth: true });
+    return this.api.post('/api/ExternalAuth/refresh', { refresh_token: refreshToken }, { skipAuth: true });
   }
 
-  async getMaskedInfo(email: string, token: string) {
-    return this.api.post('/auth/masked-info', { email }, { token });
+  async revokeToken(token: string) {
+    return this.api.post('/api/ExternalAuth/revoke', {}, { token });
   }
 
-  async verifyTwoFactor(code: string, method: string, token: string) {
-    return this.api.post('/auth/verify-2fa', { code, method }, { token });
+  async validateToken(token: string) {
+    return this.api.post('/api/ExternalAuth/validate', {}, { token });
   }
 
-  async sendTwoFactorCode(method: string, token: string) {
-    return this.api.post('/auth/send-2fa', { method }, { token });
+  // Two-factor authentication
+  async getMaskedInfo(token: string) {
+    return this.api.post('/api/Account/masked-info', {}, { token });
   }
 
+  async sendTwoFactorSms(token: string) {
+    return this.api.post('/api/ExternalAuth/twofa/sms/send', {}, { token });
+  }
+
+  async verifyTwoFactorSms(code: string, token: string) {
+    return this.api.post('/api/ExternalAuth/twofa/sms/verify', { code }, { token });
+  }
+
+  async sendTwoFactorEmail(token: string) {
+    return this.api.post('/api/ExternalAuth/twofa/email/send', {}, { token });
+  }
+
+  async verifyTwoFactorEmail(code: string, token: string) {
+    return this.api.post('/api/ExternalAuth/twofa/email/verify', { code }, { token });
+  }
+
+  // Convenience method for 2FA
+  async sendTwoFactorCode(method: 'sms' | 'email', token: string) {
+    if (method === 'sms') {
+      return this.sendTwoFactorSms(token);
+    }
+    return this.sendTwoFactorEmail(token);
+  }
+
+  async verifyTwoFactor(code: string, method: 'sms' | 'email', token: string) {
+    if (method === 'sms') {
+      return this.verifyTwoFactorSms(code, token);
+    }
+    return this.verifyTwoFactorEmail(code, token);
+  }
+
+  // Profile management
   async getProfile(token: string) {
-    return this.api.get('/user/profile', { token });
+    return this.api.get('/api/Account/profile', { token });
   }
 
   async updateProfile(updates: any, token: string) {
-    return this.api.put('/user/profile', updates, { token });
+    return this.api.put('/api/Account/profile', updates, { token });
   }
 
+  // Password management
   async changePassword(currentPassword: string, newPassword: string, token: string) {
-    return this.api.post('/auth/change-password',
-      { currentPassword, newPassword },
+    return this.api.post('/api/Account/change-password',
+      { current_password: currentPassword, new_password: newPassword },
       { token }
     );
   }
 
+  // Password reset flow
   async requestPasswordReset(email: string) {
-    return this.api.post('/auth/reset-password', { email }, { skipAuth: true });
+    return this.api.post('/api/Account/send-reset-code', { email }, { skipAuth: true });
   }
 
-  async confirmPasswordReset(token: string, newPassword: string) {
-    return this.api.post('/auth/confirm-reset',
-      { token, newPassword },
+  async verifyResetCode(email: string, code: string) {
+    return this.api.post('/api/Account/verify-reset-code', { email, code }, { skipAuth: true });
+  }
+
+  async confirmPasswordReset(code: string, newPassword: string) {
+    return this.api.post('/api/Account/reset-password',
+      { code, new_password: newPassword },
       { skipAuth: true }
     );
+  }
+
+  // Account recovery (alternative flow)
+  async initiateRecovery(email: string) {
+    return this.api.post('/api/Account/recovery/initiate', { email }, { skipAuth: true });
+  }
+
+  async sendRecoveryCode(email: string) {
+    return this.api.post('/api/Account/recovery/send-code', { email }, { skipAuth: true });
+  }
+
+  async verifyRecoveryCode(email: string, code: string) {
+    return this.api.post('/api/Account/recovery/verify-code', { email, code }, { skipAuth: true });
+  }
+
+  // User roles
+  async getRoles(token: string) {
+    return this.api.get('/api/ExternalAuth/roles', { token });
   }
 }
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,10 +10,16 @@ import {
   Platform,
   Alert,
   ActivityIndicator,
+  AppState,
+  AppStateStatus,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuthStore } from '../stores/authStore';
 import { TwoFactorVerification, MaskedContactInfo } from '../types/auth';
 import { accountApi, isApiSuccess, extractApiData } from '../utils/api';
+
+// Storage key for persisting 2FA method preference
+const TWOFACTOR_METHOD_KEY = '@PayEz:2fa_method';
 
 interface TwoFactorScreenProps {
   navigation: any; // TODO: Add proper navigation types
@@ -25,12 +31,68 @@ export const TwoFactorScreen: React.FC<TwoFactorScreenProps> = ({ navigation }) 
   const [maskedInfo, setMaskedInfo] = useState<MaskedContactInfo | null>(null);
   const [loadingMaskedInfo, setLoadingMaskedInfo] = useState(true);
   const [resendingCode, setResendingCode] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+  const [sessionExpired, setSessionExpired] = useState(false);
 
-  const { session, verifyTwoFactor, isLoading, error, logout } = useAuthStore();
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const cooldownRef = useRef<NodeJS.Timeout | null>(null);
 
+  const { session, verifyTwoFactor, isLoading, error, logout, checkSessionViability } = useAuthStore();
+
+  // Load persisted 2FA method preference and masked info on mount
   useEffect(() => {
+    loadPersistedMethod();
     loadMaskedInfo();
   }, []);
+
+  // Handle app state changes (foreground/background)
+  useEffect(() => {
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      // App came to foreground - check if session is still valid
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        console.log('[TwoFactorScreen] App came to foreground, checking session');
+        await checkSessionViability();
+
+        // If session expired while in background, show message
+        if (!session?.accessToken) {
+          setSessionExpired(true);
+        }
+      }
+      appStateRef.current = nextAppState;
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription?.remove();
+  }, [session, checkSessionViability]);
+
+  // Cooldown timer for resend
+  useEffect(() => {
+    if (cooldown > 0) {
+      cooldownRef.current = setTimeout(() => setCooldown(cooldown - 1), 1000);
+      return () => {
+        if (cooldownRef.current) clearTimeout(cooldownRef.current);
+      };
+    }
+  }, [cooldown]);
+
+  // Persist method selection when it changes
+  useEffect(() => {
+    AsyncStorage.setItem(TWOFACTOR_METHOD_KEY, selectedMethod).catch(console.error);
+  }, [selectedMethod]);
+
+  const loadPersistedMethod = async () => {
+    try {
+      const storedMethod = await AsyncStorage.getItem(TWOFACTOR_METHOD_KEY);
+      if (storedMethod && ['sms', 'email', 'authenticator'].includes(storedMethod)) {
+        setSelectedMethod(storedMethod as 'sms' | 'email' | 'authenticator');
+      }
+    } catch (err) {
+      console.error('Failed to load persisted 2FA method:', err);
+    }
+  };
 
   const loadMaskedInfo = async () => {
     if (!session?.accessToken || !session?.user?.email) {
@@ -93,6 +155,10 @@ export const TwoFactorScreen: React.FC<TwoFactorScreenProps> = ({ navigation }) 
       return;
     }
 
+    if (cooldown > 0) {
+      return; // Still in cooldown
+    }
+
     setResendingCode(true);
 
     try {
@@ -103,6 +169,7 @@ export const TwoFactorScreen: React.FC<TwoFactorScreenProps> = ({ navigation }) 
 
       if (isApiSuccess(response)) {
         Alert.alert('Success', `Verification code sent via ${selectedMethod}`);
+        setCooldown(30); // 30 second cooldown before allowing resend
       } else {
         Alert.alert('Error', 'Failed to send verification code');
       }
@@ -217,10 +284,14 @@ export const TwoFactorScreen: React.FC<TwoFactorScreenProps> = ({ navigation }) 
           <TouchableOpacity
             style={styles.linkButton}
             onPress={handleResendCode}
-            disabled={resendingCode || isLoading}
+            disabled={resendingCode || isLoading || cooldown > 0}
           >
-            <Text style={styles.linkText}>
-              {resendingCode ? 'Sending...' : 'Resend Code'}
+            <Text style={[styles.linkText, cooldown > 0 && styles.linkTextDisabled]}>
+              {resendingCode
+                ? 'Sending...'
+                : cooldown > 0
+                ? `Resend Code (${cooldown}s)`
+                : 'Resend Code'}
             </Text>
           </TouchableOpacity>
 
@@ -358,6 +429,9 @@ const styles = StyleSheet.create({
   linkText: {
     color: '#007AFF',
     fontSize: 14,
+  },
+  linkTextDisabled: {
+    color: '#999999',
   },
   cancelText: {
     color: '#666666',

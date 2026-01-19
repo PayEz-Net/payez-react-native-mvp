@@ -1,36 +1,52 @@
-import React, { useEffect } from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import React, { useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { NavigationContainer, NavigationContainerRef } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { useAuthStore } from '../stores/authStore';
 import { AuthFlowState } from '../types/auth';
+import { linkingConfig } from '../utils/deepLinking';
 
 // Import screens
 import { LoginScreen } from '../screens/LoginScreen';
+import { SignupScreen } from '../screens/SignupScreen';
+import { ForgotPasswordScreen } from '../screens/ForgotPasswordScreen';
 import { TwoFactorScreen } from '../screens/TwoFactorScreen';
-// TODO: Import additional screens as they're created
-// import { SignupScreen } from '../screens/SignupScreen';
-// import { HomeScreen } from '../screens/HomeScreen';
-// import { ProfileScreen } from '../screens/ProfileScreen';
+import { HomeScreen } from '../screens/HomeScreen';
+import { ProfileScreen } from '../screens/ProfileScreen';
+import { SettingsScreen } from '../screens/SettingsScreen';
+import { SecurityScreen } from '../screens/SecurityScreen';
 
 // Define navigation param lists
 export type RootStackParamList = {
-  Login: undefined;
+  Login: { email?: string } | undefined;
   Signup: undefined;
-  TwoFactor: undefined;
-  ForgotPassword: undefined;
+  TwoFactor: { method?: string } | undefined;
+  ForgotPassword: { token?: string; email?: string } | undefined;
   Home: undefined;
   Profile: undefined;
+  Settings: undefined;
+  Security: undefined;
+  ChangePassword: undefined;
+  Loading: undefined;
 };
 
 const Stack = createStackNavigator<RootStackParamList>();
 
+// Navigation ref for deep linking
+export const navigationRef = React.createRef<NavigationContainerRef<RootStackParamList>>();
+
 export const AppNavigator: React.FC = () => {
   const { authFlowState, loadSession } = useAuthStore();
+  const isReady = useRef(false);
 
   useEffect(() => {
     // Load persisted session on app start
     loadSession();
   }, []);
+
+  const onReady = () => {
+    isReady.current = true;
+  };
 
   const renderAuthStack = () => (
     <>
@@ -41,22 +57,22 @@ export const AppNavigator: React.FC = () => {
           headerShown: false,
         }}
       />
-      {/* TODO: Add Signup screen */}
-      {/* <Stack.Screen
+      <Stack.Screen
         name="Signup"
         component={SignupScreen}
         options={{
           title: 'Create Account',
+          headerBackTitle: 'Back',
         }}
-      /> */}
-      {/* TODO: Add ForgotPassword screen */}
-      {/* <Stack.Screen
+      />
+      <Stack.Screen
         name="ForgotPassword"
         component={ForgotPasswordScreen}
         options={{
           title: 'Reset Password',
+          headerBackTitle: 'Back',
         }}
-      /> */}
+      />
     </>
   );
 
@@ -75,12 +91,11 @@ export const AppNavigator: React.FC = () => {
 
   const renderMainStack = () => (
     <>
-      {/* TODO: Add main app screens */}
-      {/* <Stack.Screen
+      <Stack.Screen
         name="Home"
         component={HomeScreen}
         options={{
-          title: 'PayEz',
+          headerShown: false,
         }}
       />
       <Stack.Screen
@@ -88,21 +103,35 @@ export const AppNavigator: React.FC = () => {
         component={ProfileScreen}
         options={{
           title: 'Profile',
+          headerBackTitle: 'Back',
         }}
-      /> */}
-      {/* Temporary placeholder until main screens are implemented */}
+      />
       <Stack.Screen
-        name="Home"
-        component={TempHomeScreen}
+        name="Settings"
+        component={SettingsScreen}
         options={{
-          title: 'PayEz Home',
+          title: 'Settings',
+          headerBackTitle: 'Back',
+        }}
+      />
+      <Stack.Screen
+        name="Security"
+        component={SecurityScreen}
+        options={{
+          title: 'Security',
+          headerBackTitle: 'Back',
         }}
       />
     </>
   );
 
   return (
-    <NavigationContainer>
+    <NavigationContainer
+      ref={navigationRef}
+      linking={linkingConfig}
+      onReady={onReady}
+      fallback={<LoadingScreen />}
+    >
       <Stack.Navigator screenOptions={{ headerShown: true }}>
         {authFlowState === AuthFlowState.UNAUTHENTICATED && renderAuthStack()}
         {authFlowState === AuthFlowState.REQUIRES_2FA && renderTwoFactorStack()}
@@ -122,64 +151,24 @@ export const AppNavigator: React.FC = () => {
   );
 };
 
-// Temporary screens until full implementation
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-
-const TempHomeScreen: React.FC = () => {
-  const { logout, user } = useAuthStore();
-
-  return (
-    <View style={styles.tempContainer}>
-      <Text style={styles.tempTitle}>Welcome to PayEz!</Text>
-      <Text style={styles.tempSubtitle}>User: {user?.email}</Text>
-      <Text style={styles.tempInfo}>
-        Authentication successful. Main app screens to be implemented.
-      </Text>
-      <TouchableOpacity style={styles.logoutButton} onPress={logout}>
-        <Text style={styles.logoutButtonText}>Logout</Text>
-      </TouchableOpacity>
-    </View>
-  );
-};
-
+// Loading screen for token refresh state
 const LoadingScreen: React.FC = () => (
-  <View style={styles.tempContainer}>
-    <Text style={styles.tempTitle}>Loading...</Text>
+  <View style={styles.loadingContainer}>
+    <ActivityIndicator size="large" color="#007AFF" />
+    <Text style={styles.loadingText}>Loading...</Text>
   </View>
 );
 
 const styles = StyleSheet.create({
-  tempContainer: {
+  loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    backgroundColor: '#ffffff',
   },
-  tempTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginBottom: 10,
-  },
-  tempSubtitle: {
+  loadingText: {
+    marginTop: 16,
     fontSize: 16,
     color: '#666666',
-    marginBottom: 20,
-  },
-  tempInfo: {
-    fontSize: 14,
-    color: '#999999',
-    textAlign: 'center',
-    marginBottom: 30,
-  },
-  logoutButton: {
-    paddingHorizontal: 30,
-    paddingVertical: 12,
-    backgroundColor: '#ff4444',
-    borderRadius: 8,
-  },
-  logoutButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '600',
   },
 });

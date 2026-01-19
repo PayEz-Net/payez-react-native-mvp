@@ -33,9 +33,11 @@ export interface LoginCredentials {
   password: string;
 }
 
-export interface SignupCredentials extends LoginCredentials {
-  name: string;
-  confirmPassword: string;
+export interface SignupCredentials {
+  email: string;
+  password: string;
+  firstName: string;
+  lastName: string;
 }
 
 export interface TwoFactorVerification {
